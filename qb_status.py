@@ -51,6 +51,9 @@ DELETION_QUEUE = deque()  # Queue of torrents waiting for deletion
 SONARR_TRIGGER = False  # Tracks whether Sonarr should be triggered
 RADARR_TRIGGER = False  # Tracks whether Radarr should be triggered
 
+# Create a global qBittorrent client instance
+client = qbittorrentapi.Client(host=QB_HOST, username=QB_USERNAME, password=QB_PASSWORD)
+
 def get_deleted_count():
     """Reads and returns the number of torrents deleted so far. Defaults to zero if the file is missing or unreadable."""
     try:
@@ -71,28 +74,6 @@ def system_under_load():
     load = psutil.cpu_times_percent(interval=0, percpu=False)  # Non-blocking CPU load check
     return load.iowait > 10  # If I/O wait is over 10%, defer deletions
 
-async def fetch_status(session, host, api_key, app_name):
-    """Contacts Sonarr or Radarr to check if they are running and accessible."""
-    headers = {"X-Api-Key": api_key}
-    try:
-        async with session.get(f"{host}/api/v3/system/status", headers=headers, timeout=2) as response:
-            if response.status == 200:
-                print(f"Successfully connected to {app_name}.")
-    except Exception as e:
-        print(f"Error connecting to {app_name}: {e}")
-
-async def trigger_search(session, api_host, api_key, app_name):
-    """Triggers a search in Sonarr or Radarr to replace missing content after deletion."""
-    headers = {"X-Api-Key": api_key}
-    search_endpoint = f"{api_host}/api/v3/command"
-    payload = {"name": "MissingEpisodeSearch"} if "sonarr" in api_host else {"name": "missingMoviesSearch"}
-    try:
-        async with session.post(search_endpoint, headers=headers, json=payload, timeout=2) as response:
-            if response.status == 201:
-                print(f"Triggered search for missing files in {app_name}.")
-    except Exception as e:
-        print(f"Error triggering search in {app_name}: {e}")
-
 async def process_deletions():
     """Handles the deletion of stalled torrents in batches. If system load is high, waits before retrying."""
     global SONARR_TRIGGER, RADARR_TRIGGER
@@ -103,7 +84,7 @@ async def process_deletions():
             continue
         
         batch = [DELETION_QUEUE.popleft() for _ in range(min(BATCH_SIZE, len(DELETION_QUEUE)))]
-        client.torrents_delete(delete_files=True, torrent_hashes=[t.hash for t in batch])
+        client.torrents_delete(delete_files=True, torrent_hashes=[t.hash for t in batch])  # Now uses the global client
         update_deleted_count(len(batch))  # Update total deletions
         print(f"Deleted {len(batch)} torrents. Remaining: {len(DELETION_QUEUE)}")
         
@@ -120,7 +101,6 @@ async def monitor_torrents():
     global SONARR_TRIGGER, RADARR_TRIGGER
     while True:
         try:
-            client = qbittorrentapi.Client(host=QB_HOST, username=QB_USERNAME, password=QB_PASSWORD)
             print("Successfully connected to qBittorrent.")
             
             current_time = time.time()
@@ -142,15 +122,7 @@ async def monitor_torrents():
 
 async def main():
     async with aiohttp.ClientSession() as session:
-        tasks = [
-            monitor_torrents(),
-            fetch_status(session, SONARR_HOST, SONARR_API_KEY, "Sonarr"),
-            fetch_status(session, RADARR_HOST, RADARR_API_KEY, "Radarr")
-        ]
-        if SONARR_TRIGGER:
-            tasks.append(trigger_search(session, SONARR_HOST, SONARR_API_KEY, "Sonarr"))
-        if RADARR_TRIGGER:
-            tasks.append(trigger_search(session, RADARR_HOST, RADARR_API_KEY, "Radarr"))
+        tasks = [monitor_torrents()]
         await asyncio.gather(*tasks)
 
 if __name__ == "__main__":
