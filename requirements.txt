@@ -1,0 +1,6 @@
+qbittorrent-api
+aiohttp
+psutil
+pip 
+asyncio
+request
