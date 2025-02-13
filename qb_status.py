@@ -10,6 +10,8 @@ from collections import deque
 # Load configuration from external JSON file
 CONFIG_FILE = "/app/config.json"
 
+CHECK_INTERVAL = 300  # Check every 5 minutes
+
 def load_config():
     try:
         with open(CONFIG_FILE, "r") as f:
@@ -41,7 +43,6 @@ RADARR_API_KEY = config["RADARR_API_KEY"]
 
 # Time threshold in seconds (5 minutes)
 TIME_THRESHOLD = 5 * 60
-current_time = time.time()
 
 # File to store the running count of deleted torrents
 DELETE_COUNT_FILE = "/app/deleted_count.txt"
@@ -108,32 +109,42 @@ async def process_deletions():
         
         await asyncio.sleep(1)  # Reduce disk I/O wait
 
-try:
-    client = qbittorrentapi.Client(host=QB_HOST, username=QB_USERNAME, password=QB_PASSWORD)
-    print("Successfully connected to qBittorrent.")
-    
-    torrents = client.torrents_info(status_filter="stalled", fields=["hash", "num_seeds", "added_on", "category"])
-    for torrent in torrents:
-        if (current_time - torrent.added_on) >= TIME_THRESHOLD and torrent.num_seeds == 0:
-            DELETION_QUEUE.append(torrent)
-    
-    if not DELETION_QUEUE:
-        print("No eligible stalled torrents found for deletion.")
-    else:
-        print(f"Processing {len(DELETION_QUEUE)} torrents for deletion...")
-        asyncio.create_task(process_deletions())
-except Exception as e:
-    print(f"Error connecting to qBittorrent: {e}")
+async def monitor_torrents():
+    global SONARR_TRIGGER, RADARR_TRIGGER
+    while True:
+        try:
+            client = qbittorrentapi.Client(host=QB_HOST, username=QB_USERNAME, password=QB_PASSWORD)
+            print("Successfully connected to qBittorrent.")
+            
+            current_time = time.time()
+            torrents = client.torrents_info(status_filter="stalled", fields=["hash", "num_seeds", "added_on", "category"])
+            DELETION_QUEUE.clear()
+            for torrent in torrents:
+                if (current_time - torrent.added_on) >= TIME_THRESHOLD and torrent.num_seeds == 0:
+                    DELETION_QUEUE.append(torrent)
+            
+            if not DELETION_QUEUE:
+                print("No eligible stalled torrents found for deletion.")
+            else:
+                print(f"Processing {len(DELETION_QUEUE)} torrents for deletion...")
+                await process_deletions()
+        except Exception as e:
+            print(f"Error connecting to qBittorrent: {e}")
+        
+        await asyncio.sleep(CHECK_INTERVAL)  # Wait before checking again
 
 async def main():
     async with aiohttp.ClientSession() as session:
-        tasks = [fetch_status(session, SONARR_HOST, SONARR_API_KEY, "Sonarr"),
-                 fetch_status(session, RADARR_HOST, RADARR_API_KEY, "Radarr")]
+        tasks = [
+            monitor_torrents(),
+            fetch_status(session, SONARR_HOST, SONARR_API_KEY, "Sonarr"),
+            fetch_status(session, RADARR_HOST, RADARR_API_KEY, "Radarr")
+        ]
         if SONARR_TRIGGER:
             tasks.append(trigger_search(session, SONARR_HOST, SONARR_API_KEY, "Sonarr"))
         if RADARR_TRIGGER:
             tasks.append(trigger_search(session, RADARR_HOST, RADARR_API_KEY, "Radarr"))
         await asyncio.gather(*tasks)
 
-if SONARR_TRIGGER or RADARR_TRIGGER:
-    asyncio.create_task(main())
+if __name__ == "__main__":
+    asyncio.run(main())
