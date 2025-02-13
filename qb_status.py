@@ -7,12 +7,13 @@ import psutil
 import json
 from collections import deque
 
-# Load configuration from external JSON file
+# Load configuration from an external JSON file to keep credentials and settings separate from the script
 CONFIG_FILE = "/app/config.json"
 
-CHECK_INTERVAL = 300  # Check every 5 minutes
+CHECK_INTERVAL = 300  # Time interval (in seconds) between each torrent check cycle
 
 def load_config():
+    """Loads the configuration file containing connection details. If the file is missing or invalid, it exits."""
     try:
         with open(CONFIG_FILE, "r") as f:
             return json.load(f)
@@ -20,12 +21,13 @@ def load_config():
         print("Configuration file not found! Make sure config.json exists.")
         exit(1)
     except json.JSONDecodeError:
-        print("Error parsing configuration file.")
+        print("Error parsing configuration file. Ensure the JSON is correctly formatted.")
         exit(1)
 
+# Load configuration into a dictionary
 config = load_config()
 
-# Common host IP
+# Centralized host IP to avoid repetition across services
 HOST = config["HOST"]
 
 # qBittorrent connection details
@@ -33,25 +35,24 @@ QB_HOST = f"http://{HOST}:{config['QB_PORT']}"
 QB_USERNAME = config["QB_USERNAME"]
 QB_PASSWORD = config["QB_PASSWORD"]
 
-# Sonarr connection details
+# Sonarr and Radarr details (to trigger searches when necessary)
 SONARR_HOST = f"http://{HOST}:{config['SONARR_PORT']}"
 SONARR_API_KEY = config["SONARR_API_KEY"]
-
-# Radarr connection details
 RADARR_HOST = f"http://{HOST}:{config['RADARR_PORT']}"
 RADARR_API_KEY = config["RADARR_API_KEY"]
 
-# Time threshold in seconds (5 minutes)
+# Minimum time (in seconds) a torrent must be stalled before deletion is considered
 TIME_THRESHOLD = 5 * 60
 
-# File to store the running count of deleted torrents
+# File to store the total number of deleted torrents (for tracking purposes)
 DELETE_COUNT_FILE = "/app/deleted_count.txt"
-BATCH_SIZE = 5  # Limit batch size for deletion
-DELETION_QUEUE = deque()  # Store torrents to delete in a queue
-SONARR_TRIGGER = False
-RADARR_TRIGGER = False
+BATCH_SIZE = 5  # Number of torrents to delete at once for efficiency
+DELETION_QUEUE = deque()  # Queue of torrents waiting for deletion
+SONARR_TRIGGER = False  # Tracks whether Sonarr should be triggered
+RADARR_TRIGGER = False  # Tracks whether Radarr should be triggered
 
 def get_deleted_count():
+    """Reads and returns the number of torrents deleted so far. Defaults to zero if the file is missing or unreadable."""
     try:
         with open(DELETE_COUNT_FILE, "r") as f:
             return int(f.read().strip())
@@ -59,16 +60,19 @@ def get_deleted_count():
         return 0
 
 def update_deleted_count(new_deletions):
+    """Updates the file with the latest number of deleted torrents."""
     total_deleted = get_deleted_count() + new_deletions
     with open(DELETE_COUNT_FILE, "w") as f:
         f.write(str(total_deleted))
     return total_deleted
 
 def system_under_load():
+    """Checks CPU I/O wait. If it's too high, delays deletion to prevent system overload."""
     load = psutil.cpu_times_percent(interval=0, percpu=False)  # Non-blocking CPU load check
-    return load.iowait > 10  # If I/O wait is over 10%, defer work
+    return load.iowait > 10  # If I/O wait is over 10%, defer deletions
 
 async def fetch_status(session, host, api_key, app_name):
+    """Contacts Sonarr or Radarr to check if they are running and accessible."""
     headers = {"X-Api-Key": api_key}
     try:
         async with session.get(f"{host}/api/v3/system/status", headers=headers, timeout=2) as response:
@@ -78,6 +82,7 @@ async def fetch_status(session, host, api_key, app_name):
         print(f"Error connecting to {app_name}: {e}")
 
 async def trigger_search(session, api_host, api_key, app_name):
+    """Triggers a search in Sonarr or Radarr to replace missing content after deletion."""
     headers = {"X-Api-Key": api_key}
     search_endpoint = f"{api_host}/api/v3/command"
     payload = {"name": "MissingEpisodeSearch"} if "sonarr" in api_host else {"name": "missingMoviesSearch"}
@@ -89,6 +94,7 @@ async def trigger_search(session, api_host, api_key, app_name):
         print(f"Error triggering search in {app_name}: {e}")
 
 async def process_deletions():
+    """Handles the deletion of stalled torrents in batches. If system load is high, waits before retrying."""
     global SONARR_TRIGGER, RADARR_TRIGGER
     while DELETION_QUEUE:
         if system_under_load():
@@ -98,7 +104,7 @@ async def process_deletions():
         
         batch = [DELETION_QUEUE.popleft() for _ in range(min(BATCH_SIZE, len(DELETION_QUEUE)))]
         client.torrents_delete(delete_files=True, torrent_hashes=[t.hash for t in batch])
-        update_deleted_count(len(batch))  # Keep updating deleted count
+        update_deleted_count(len(batch))  # Update total deletions
         print(f"Deleted {len(batch)} torrents. Remaining: {len(DELETION_QUEUE)}")
         
         for t in batch:
@@ -110,6 +116,7 @@ async def process_deletions():
         await asyncio.sleep(1)  # Reduce disk I/O wait
 
 async def monitor_torrents():
+    """Continuously monitors qBittorrent for stalled torrents and queues them for deletion."""
     global SONARR_TRIGGER, RADARR_TRIGGER
     while True:
         try:
