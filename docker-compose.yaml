@@ -1,0 +1,17 @@
+version: "3.9"
+
+services:
+  qbittorrent-cleanup:
+    image: python:3.11-slim
+    container_name: qbittorrent-cleanup
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - ./config.json:/app/config.json
+      - ./deleted_count.txt:/app/deleted_count.txt
+      - ./qb_status.py:/app/qb_status.py
+      - ./requirements.txt:/app/requirements.txt
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: >
+      sh -c "pip install --no-cache-dir -r requirements.txt && python /app/qb_status.py"
